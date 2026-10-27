@@ -6,14 +6,23 @@ fictional publisher `lumen`, and the CI that tests, signs and releases it.
 
 `lumen-hello` is an isolated plugin, run by the hub in a process of its own:
 
-- `evo-plugin.json`: the manifest (plugin-v1): id, version, publisher, `tier: isolated`, `plugin_api: 1`, a config
-  field `greeting`, and what it contributes;
+- `evo-plugin.json`: the manifest (plugin-v1): id, version, publisher, `tier: isolated`, `plugin_api: 1`, the
+  permission `records:use`, config fields (`greeting`, and `wave_level` and `wave_audience` for the records), and what
+  it contributes;
 - `backend/main.py`: a backend in Python's standard library that speaks plugin/1 on stdin and stdout;
-- a route, `GET|POST /v1/x/lumen-hello/<project>/waves`: the project's greeting and the waves its members left;
+- a collection of records, `waves`, in the hub's records store: each wave a member leaves is a record in the hub's
+  Postgres (so in its backup, and still there after the backend restarts or the plugin moves to another host), at the
+  level and for the audience the project's admin sets with `wave_level` and `wave_audience`. The hub shows each member
+  only the waves their access reaches;
+- a route, `GET|POST /v1/x/lumen-hello/<project>/waves`: the project's greeting and the waves the caller sees; the
+  backend reads and writes the records for the caller, with its plugin token and the call's delegation
+  (`caller.token`, sent as `X-Evo-On-Behalf-Of`);
 - an MCP tool, `lumen-hello__greet`: greets someone by name;
 - a page, `pages/hello/index.html`, on the hub's UI kit (`/v1/plugin-ui/kit/1/evo-ui.css` and `evo-ui.js`), its words
-  in English and Vietnamese under `pages/hello/i18n/`;
-- `tests/test_plugin.py`: tests of the backend over plugin/1 and of the files the hub reads;
+  in English and Vietnamese under `pages/hello/i18n/`; it lists and adds waves through the bridge
+  (`evo.call("records.list")`, `evo.call("records.put")`);
+- `tests/test_plugin.py`: tests of the backend over plugin/1, against a stand-in for the hub's records API, and of the
+  files the hub reads;
 - `market-entry.json`: the plugin's entry for a market's `market.json` (plugin-market-v1).
 
 The protocol, the page bridge and the UI kit are described in
@@ -43,11 +52,20 @@ selling in [docs/market.md](https://github.com/maycuatroi1/evo-agents/blob/main/
 5. Release a version: raise `version` in `evo-plugin.json`, then tag it with that version and push the tag.
 
    ```sh
-   git tag v0.1.0 && git push origin v0.1.0
+   git tag v0.2.0 && git push origin v0.2.0
    ```
 
    The CI fails when the tag is not `v` plus the manifest's version. For a free plugin it makes the GitHub Release
-   with `ID-0.1.0.tar.gz` and its Sigstore signature `ID-0.1.0.tar.gz.sigstore.json`.
+   with `ID-0.2.0.tar.gz` and its Sigstore signature `ID-0.2.0.tar.gz.sigstore.json`.
+
+## Records
+
+A plugin that keeps a company's papers (leave requests, expense vouchers, draft entries) keeps them as records of the
+hub, not in `data/<name>/` of its backend. The sample does it with `waves`; the section Records of
+[docs/plugins.md](https://github.com/maycuatroi1/evo-agents/blob/main/docs/plugins.md) has the whole contract:
+`records:use` in `permissions` (a project's admin grants it, and sets `records_level` for jobs and events, which have
+no caller), a `level` and an `audience` for each kind of record, `revision` on updates, and 404, 409 and 403 as the
+answers. To turn the sample collection into the records of your trade, see [docs/rename.md](docs/rename.md).
 
 ## The CI
 
@@ -71,7 +89,7 @@ A hub admin installs a release straight from GitHub. The first install of a publ
 signer; `--trust` confirms it:
 
 ```sh
-evo-agents hub plugin install --github OWNER/NAME@v0.1.0 --trust
+evo-agents hub plugin install --github OWNER/NAME@v0.2.0 --trust
 ```
 
 The hub downloads the release's bundle and signature, checks that `sigstore:OWNER/NAME/.github/workflows/ci.yml`

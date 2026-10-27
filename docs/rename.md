@@ -25,6 +25,28 @@ Then make the plugin yours:
   `license`.
 - `README.md`: what the plugin does, for its users.
 
+## Change the sample collection into your records
+
+`lumen-hello` keeps one collection of records, `waves` (a lowercase name: letters, digits, `-` and `_`, starting with a
+letter). Replace it with the files of your trade: `leave-requests`, `expense-vouchers`, `journal-drafts`, `customers`.
+
+1. Name the collection once. `COLLECTION` in `backend/main.py` and `COLLECTION` in `pages/hello/hello.js` hold it; the
+   tests and the page's words say "wave", so search for `wave` and rename what you find.
+2. Decide, for each kind of record, its `level` (a level of the project's ladder: a leave request `internal`, an expense
+   voucher `finance`) and its `audience` (`everyone` the level reaches, or `writer`, only the person who wrote it).
+   The manifest declares them as `config` fields, as `wave_level` and `wave_audience` do, so a project's admin sets them
+   when enabling the plugin; or fix them in the code when the trade does not vary. A record may not sit higher than
+   the writer reaches.
+3. Keep the permission `records:use` in `permissions`, and ask for nothing else the plugin does not need. A project's
+   admin grants it; a job or an event, which has no caller, reaches only up to the `records_level` the admin set.
+4. Shape the record's `body`: a JSON object of 64 KiB at most. Use generated keys for new records and `revision` on
+   every update, so that two people do not overwrite each other.
+5. The page keeps using the bridge (`records.list`, `records.get`, `records.put`, `records.delete`); the backend uses
+   `Plugin.records`, which sends the plugin token and the call's `caller.token`. Never send a delegation from another call.
+6. Rewrite the tests: `Hub` in `tests/test_plugin.py` stands in for the records API; `evo-agents plugin test .` also
+   checks, with its own stand-in hub, that the plugin does not call the records without `records:use`, for another
+   project's records, or with a delegation the call did not carry.
+
 ## Find what is left
 
 ```sh

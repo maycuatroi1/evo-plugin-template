@@ -1,6 +1,6 @@
 evo.messages("vi", {
   greeting: "{greeting} từ Lumen",
-  intro: "Để lại một lời chào cho dự án. Plugin giữ 20 lời chào gần nhất cho tới khi hub khởi động lại nó.",
+  intro: "Để lại một lời chào cho dự án. Lời chào là bản ghi của hub: còn nguyên sau khi khởi động lại, và mỗi người chỉ thấy những lời chào trong quyền truy cập của mình.",
   name: "Tên của bạn",
   wave: "Chào",
   who: "Ai",

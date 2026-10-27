@@ -10,8 +10,12 @@ The plugin/1 protocol):
 - ``tool``: a call to the MCP tool lumen-hello__greet;
 - ``ping`` and ``shutdown``.
 
-The waves live in memory, the last MAX_WAVES of each project, and are gone when the hub restarts the backend: a
-plugin that must keep data stores it through the hub's API or a service of its own.
+The waves are records of the hub, collection ``waves`` of the project (docs/plugins.md of evo-agents, section Records):
+they sit in the hub's Postgres and its backup, not in this process or its data directory, so a restart or a new host
+loses nothing. The backend reads and writes them for the person whose call it serves: it sends its own token
+(``hub.token`` of ``initialize``) and ``caller.token`` of the call as ``X-Evo-On-Behalf-Of``, so the hub applies that
+person's grant. The level and the audience of a wave come from the config (``wave_level``, ``wave_audience``). The
+page lists and adds waves through the bridge (``records.list``, ``records.put``) and needs none of this.
 """
 
 from __future__ import annotations
@@ -19,12 +23,20 @@ from __future__ import annotations
 import base64
 import json
 import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote, urlencode
 
 PROTOCOL = "plugin/1"
 MANIFEST = Path(__file__).resolve().parent.parent / "evo-plugin.json"
 MAX_WAVES = 20
+COLLECTION = "waves"
+TIMEOUT = 10  # seconds for one call to the hub
+KEY_BASE = 10**13  # keys count down from it, so the newest wave sorts first
 MAX_NAME = 80
 DEFAULT_GREETING = "Hello"
 INVALID_PARAMS, METHOD_NOT_FOUND, PARSE_ERROR = -32602, -32601, -32700
@@ -50,20 +62,62 @@ def tools_of(manifest: dict) -> list[dict]:
     ]
 
 
+class HubRefused(Exception):
+    """The hub answered a records call with ``status``: 403 above the caller's level, 404 for a record not seen."""
+
+    def __init__(self, status: int, detail: str):
+        super().__init__(detail)
+        self.status = status
+
+
 class Plugin:
-    """The plugin's state: its config and each project's waves."""
+    """The plugin's state: its config and how to reach the hub. The waves are the hub's records."""
 
     def __init__(self, manifest: dict):
         self.manifest = manifest
         self.config: dict = {"instance": {}, "projects": {}}
-        self.waves: dict[str, list[dict]] = {}
+        self.hub: dict = {}
+
+    def setting(self, project: str, name: str, default: str) -> str:
+        layer = self.config.get("projects", {}).get(project) or self.config.get("instance", {})
+        return str(layer.get(name) or default)
 
     def greeting(self, project: str) -> str:
-        layer = self.config.get("projects", {}).get(project) or self.config.get("instance", {})
-        return str(layer.get("greeting") or DEFAULT_GREETING)
+        return self.setting(project, "greeting", DEFAULT_GREETING)
+
+    def records(self, project: str, caller: dict, method: str, path: str = "", query: dict | None = None, body=None):
+        """One call of the records API of ``project``, for the person ``caller`` stands for; the JSON answered."""
+        url = f"{str(self.hub.get('url', '')).rstrip('/')}/v1/plugin-api/projects/{quote(project, safe='')}/records/"
+        url += COLLECTION + path + (f"?{urlencode(query)}" if query else "")
+        headers = {"Authorization": f"Bearer {self.hub.get('token', '')}", "Content-Type": "application/json"}
+        if caller.get("token"):
+            headers["X-Evo-On-Behalf-Of"] = str(caller["token"])
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(url, data=data, headers=headers, method=method), timeout=TIMEOUT
+            ) as answer:
+                return json.loads(answer.read() or b"null")
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = str(json.loads(exc.read()).get("detail"))
+            except (ValueError, AttributeError):
+                detail = str(exc.reason)
+            raise HubRefused(exc.code, detail) from None
+        except (urllib.error.URLError, OSError) as exc:
+            raise HubRefused(502, f"the hub is not reachable: {exc}") from None
+
+    def waves(self, project: str, caller: dict) -> list[dict]:
+        """The latest waves the caller sees, newest first."""
+        listed = self.records(project, caller, "GET", query={"limit": MAX_WAVES})
+        return [
+            {"name": item["body"].get("name", ""), "at": item["body"].get("at", ""), "by": item.get("created_by")}
+            for item in ((listed or {}).get("records") or [])[:MAX_WAVES]
+        ]
 
     def initialize(self, params: dict) -> dict:
         self.config = params.get("config") or {"instance": {}, "projects": {}}
+        self.hub = params.get("hub") or {}
         plugin = params.get("plugin") or {}
         print(f"lumen-hello {plugin.get('version')}: serving", file=sys.stderr)
         return {
@@ -75,28 +129,45 @@ class Plugin:
     def route(self, params: dict) -> dict:
         if params.get("route") != "waves":
             raise Refused(INVALID_PARAMS, f"no route {params.get('route')!r}")
-        project = str((params.get("caller") or {}).get("project") or "")
+        caller = params.get("caller") or {}
+        project = str(caller.get("project") or "")
         request = params.get("request") or {}
         method = str(request.get("method") or "GET").upper()
-        if method == "GET":
-            return self.answer(200, self.board(project))
-        if method == "POST":
-            try:
-                body = json.loads(base64.b64decode(request.get("body") or "") or b"{}")
-            except ValueError:
-                return self.answer(422, {"detail": "the body is not JSON"})
-            name = body.get("name") if isinstance(body, dict) else None
-            if not isinstance(name, str) or not name.strip() or len(name) > MAX_NAME:
-                return self.answer(422, {"detail": f"name is a text of 1 to {MAX_NAME} characters"})
-            wave = {"name": name.strip(), "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-            kept = self.waves.setdefault(project, [])
-            kept.insert(0, wave)
-            del kept[MAX_WAVES:]
-            return self.answer(201, self.board(project))
+        try:
+            if method == "GET":
+                return self.answer(200, self.board(project, caller))
+            if method == "POST":
+                try:
+                    body = json.loads(base64.b64decode(request.get("body") or "") or b"{}")
+                except ValueError:
+                    return self.answer(422, {"detail": "the body is not JSON"})
+                name = body.get("name") if isinstance(body, dict) else None
+                if not isinstance(name, str) or not name.strip() or len(name) > MAX_NAME:
+                    return self.answer(422, {"detail": f"name is a text of 1 to {MAX_NAME} characters"})
+                self.wave(project, caller, name.strip())
+                return self.answer(201, self.board(project, caller))
+        except HubRefused as exc:
+            return self.answer(exc.status, {"detail": str(exc)})
         return self.answer(405, {"detail": f"{method} is not served here"})
 
-    def board(self, project: str) -> dict:
-        return {"project": project, "greeting": self.greeting(project), "waves": self.waves.get(project, [])}
+    def wave(self, project: str, caller: dict, name: str) -> None:
+        """Keeps a wave as a record, at the level and for the audience the config sets."""
+        at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        key = f"{KEY_BASE - int(time.time() * 1000):013d}-{uuid.uuid4().hex[:8]}"
+        record: dict = {"body": {"name": name, "at": at}, "audience": self.setting(project, "wave_audience", "everyone")}
+        level = self.setting(project, "wave_level", "")
+        if level:
+            record["level"] = level
+        self.records(project, caller, "PUT", f"/{quote(key, safe='')}", body=record)
+
+    def board(self, project: str, caller: dict) -> dict:
+        return {
+            "project": project,
+            "greeting": self.greeting(project),
+            "level": self.setting(project, "wave_level", ""),
+            "audience": self.setting(project, "wave_audience", "everyone"),
+            "waves": self.waves(project, caller),
+        }
 
     @staticmethod
     def answer(status: int, body: dict) -> dict:
@@ -110,11 +181,15 @@ class Plugin:
     def tool(self, params: dict) -> dict:
         if params.get("tool") != "greet":
             raise Refused(INVALID_PARAMS, f"no tool {params.get('tool')!r}")
-        project = str((params.get("caller") or {}).get("project") or "")
+        caller = params.get("caller") or {}
+        project = str(caller.get("project") or "")
         name = (params.get("arguments") or {}).get("name")
         if not isinstance(name, str) or not name.strip():
             return {"content": [{"type": "text", "text": "name is required"}], "is_error": True}
-        count = len(self.waves.get(project, []))
+        try:
+            count = len(self.waves(project, caller))
+        except HubRefused as exc:
+            return {"content": [{"type": "text", "text": f"the hub refused the waves: {exc}"}], "is_error": True}
         text = f"{self.greeting(project)}, {name.strip()}! The page holds {count} wave(s)."
         return {"content": [{"type": "text", "text": text}], "is_error": False}
 
