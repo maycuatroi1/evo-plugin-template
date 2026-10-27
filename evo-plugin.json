@@ -1,13 +1,13 @@
 {
   "id": "lumen-hello",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "lumen",
   "name": "Lumen hello",
-  "description": "The sample plugin of evo-plugin-template: a greeting a project's admin sets, a page where members leave a wave, a route that reads and records the waves, and an MCP tool that greets someone by name.",
+  "description": "The sample plugin of evo-plugin-template: a greeting a project's admin sets, a page where members leave a wave, kept as records of the hub (collection waves, with a level and an audience the admin sets), a route that reads and records the waves, and an MCP tool that greets someone by name.",
   "tier": "isolated",
-  "engines": {"evo-agents": ">=0.47"},
+  "engines": {"evo-agents": ">=0.49"},
   "plugin_api": 1,
-  "permissions": [],
+  "permissions": ["records:use"],
   "config": {
     "type": "object",
     "properties": {
@@ -17,6 +17,20 @@
         "description": "The word the page and the tool greet with.",
         "default": "Hello",
         "maxLength": 40
+      },
+      "wave_level": {
+        "type": "string",
+        "title": "Level of a wave",
+        "description": "The level of the project's ladder each wave is kept at (the collection waves). Empty: the level of the project's default label.",
+        "default": "",
+        "maxLength": 40
+      },
+      "wave_audience": {
+        "type": "string",
+        "title": "Audience of a wave",
+        "description": "everyone: whom the level reaches see the wave; writer: only the person who left it.",
+        "enum": ["everyone", "writer"],
+        "default": "everyone"
       }
     }
   },
